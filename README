@@ -1,0 +1,28 @@
+This is Perl module WebService::Gree::Community.
+
+INSTALLATION
+
+WebService::Gree::Community installation is straightforward. If your CPAN shell is set up,
+you should just be able to do
+
+    % git clone https://Likk@github.com/Likk/WebService-Gree-Community.git ./
+
+Download it, unpack it, then build it as per the usual:
+
+    % cd ./WebService-Gree-Community 
+    % perl Makefile.PL
+    % make && make test
+
+Then install it:
+
+    % make install
+
+DOCUMENTATION
+
+WebService::Gree::Community documentation is available as in POD. So you can do:
+
+    % perldoc WebService::Gree::Community
+
+to read the documentation online with your favorite pager.
+
+Likkradyus
