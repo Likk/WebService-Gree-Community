@@ -20,8 +20,8 @@ die "required community id" unless $id;
   );
 }
 { # scrape member open_social_id
-  my $members = $ws->get_members( community_id => $id) || [];
+  my $bbs_list = $ws->get_bbs_list( community_id => $id) || [];
   use YAML;
-  print YAML::Dump [ sort @$members ];
+  print YAML::Dump [ sort @$bbs_list ];
 }
 

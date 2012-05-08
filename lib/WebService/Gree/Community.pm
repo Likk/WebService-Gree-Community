@@ -27,6 +27,7 @@ use warnings;
 use Carp;
 use WWW::Mechanize;
 use Web::Scraper;
+use Text::Trim;
 
 our $VERSION = '0.01';
 
@@ -116,17 +117,54 @@ sub get {
 sub get_members {
   my $self = shift;
   my %args = @_;
-  $self->{community_id} = $args{id} if $args{id};
+  my $community_id = $args{community_id} ? $args{community_id} : $self->{community_id};
   my $members = [];
-  my $member_count = $self->_perse_member_count();
-  warn $member_count;
+  my $member_count = $self->_perse_member_count($community_id);
   for my $offset (0..$member_count/10){
-    my $page_member = $self->_parse_community_members($offset * 10) || [];
+    my $page_member = $self->_parse_community_members($community_id, $offset * 10) || [];
     push @$members, @$page_member;
-    warn $offset * 10;
     warn join(',', @$page_member);
   }
   return $members;
+}
+
+=head2 get_bbs_list
+
+コミュニティ内トピック一覧
+
+=cut
+
+sub get_bbs_list {
+  my $self = shift;
+  my %args = @_;
+  my $community_id = $args{community_id} ? $args{community_id} : $self->{community_id};
+  my $bbs_list = [];
+  my $offset   = 0;
+  while (1){
+    my $res = $self->get("@{[$self->{root}]}/?community_id=@{[$community_id]}&action=community_bbs_list&more=1&offset=@{[$offset]}");
+    my $bbs_list_wk = $self->_parse_bbs_list($res->decoded_content()) || [];
+    push @$bbs_list, @$bbs_list_wk;
+    last if scalar @$bbs_list_wk < 10;
+    $offset += 10;
+  }
+  return $bbs_list;
+}
+
+=head2 show_bbs
+
+bbs内の閲覧
+
+=cut
+
+sub show_bbs {
+  my $self = shift;
+  my %args = @_;
+  my $page = $self->{page} || 1;
+  my $community_id = $args{community_id} ? $args{community_id} : $self->{community_id};
+  my $thread_id    = $args{thread_id};
+  my $offset       = ($page - 1) * 5;
+  my $res = $self->get("@{[$self->{root}]}/?community_id=@{[$community_id]}&thread_id=@{[$thread_id]}&action=community_bbs_view&offset=@{[$offset]}");
+  $self->_parse_bbs($res->decoded_content);
 }
 
 =head1 PRIVATE METHODS.
@@ -154,8 +192,8 @@ sub _sleep_interval {
 
 sub _perse_member_count {
   my $self = shift;
-
-  my $res     = $self->get("@{[$self->{root}]}/?action=community_bbs_list&community_id=@{[$self->{community_id}]}&from_tsns=stream_community&group=community");
+  my $community_id = shift;
+  my $res     = $self->get("@{[$self->{root}]}/?action=community_bbs_list&community_id=@{[$community_id]}&from_tsns=stream_community&group=community");
   my $content = $res->decoded_content();
 
   my $scraper = scraper {
@@ -172,15 +210,16 @@ sub _perse_member_count {
 
 =item B<_parse_community_members>
 
-ページ内のメンバー ID を取得
+ページ内のメンバーID を取得
 
 =cut
 
 sub _parse_community_members {
   my $self   = shift;
+  my $community_id = shift;
   my $offset = shift;
   my $members = [];
-  my $res     = $self->get("@{[$self->{root}]}/?action=community_view_joinlist&community_id=@{[$self->{community_id}]}&group=community&offset=@{[$offset]}&tab=community_members&more=1");
+  my $res     = $self->get("@{[$self->{root}]}/?action=community_view_joinlist&community_id=@{[$community_id]}&group=community&offset=@{[$offset]}&tab=community_members&more=1");
   my $content = $res->decoded_content();
   my $scraper = scraper {
     process '//div[@class="followerList clearfix community_view_joinlist"]', 'members[]' => '@id';
@@ -194,7 +233,85 @@ sub _parse_community_members {
   return $members;
 }
 
+=item B<_bbs_list>
+
+トピック一覧のパース
+
+=cut
+
+sub _parse_bbs_list {
+  my $self = shift;
+  my $html = shift;
+  my $bbs_list = [];
+
+  my $scraper = scraper {
+    process '//a', 'data[]' => scraper {
+      process '//div[@class="txt"]/div[1]/span[@class="userName"]', title       => 'TEXT';
+      process '//div[@class="txt"]/div[1]/span[@class="count"]',    count       => 'TEXT';
+      process '//div[@class="txt"]//div[@class="description"]',     description => 'TEXT';
+      process '//div[@class="txt"]//div[@class="timestamp"]',       timestamp   => 'TEXT';
+    };
+    process '//a', 'script[]' => '@onclick';
+  };
+  my $bbs_list_wk = $scraper->scrape($html);
+  for my $index (0.. $#{$bbs_list_wk->{data}}){
+
+    #thread_id が onclick に入り込んでるのでそれを取り出してやる
+    my $script = $bbs_list_wk->{script}->[$index];
+    $script =~ s{^(?:.*)?'thread_id':'(\d+)'(.*)?$}{$1};
+
+
+    #valueの前後に半角空白が入るので trim してやる
+    my $data = $bbs_list_wk->{data}->[$index];
+    while(my($k, $v) = each %$data){
+      $data->{$k} = trim($v);
+    }
+
+    #整形して結果にpush
+    push @$bbs_list, {
+      %{$data},
+      link => $script,
+    };
+  }
+  return $bbs_list;
+}
+
+=item B<_parse_bbs>
+
+ﾄﾋﾟｯｸの中身を見るよ
+
+=cut
+
+sub _parse_bbs {
+  my $self = shift;
+  my $html = shift;
+  my $result = [];
+  my $scraper = scraper {
+    process '//div', 'divs[]' => scraper {
+      process '//div[@class="userName"]/div[@class="nickname"]', user_name => 'TEXT';
+      process '//div[@class="comTxt"]',                          description => 'TEXT';
+      process '//div[@class="timestamp"]',                       timestamp => 'TEXT';
+    };
+  };
+
+  my $data = $scraper->scrape($html);
+  for my $div (@{$data->{divs}}){
+    #関係ない div を除去する
+    next if ref $div ne 'HASH';
+    next if not exists $div->{user_name} or not exists $div->{description} or not exists $div->{timestamp};
+
+    #valueの前後に半角空白が入るので trim してやる
+    while(my($k, $v) = each %$div){
+      $div->{$k} = trim($v);
+    }
+    push @$result, $div;
+
+  }
+  return $result;
+}
+
 1;
+
 __END__
 
 =back

@@ -6,8 +6,10 @@ use WebService::Gree::Community;
 use Config::Pit;
 use utf8;
 my ($ws);
-my $id = shift @ARGV;
-die "required community id" unless $id;
+my $community_id = shift @ARGV;
+my $thread_id    = shift @ARGV;
+die "required community id and thread id" if not defined $community_id or not defined $thread_id;
+
 { #prepare
   my $pit = pit_get('gree.jp', require => {
       mail_address  => 'your mail_address on gree.jp',
@@ -20,8 +22,11 @@ die "required community id" unless $id;
   );
 }
 { # scrape member open_social_id
-  my $members = $ws->get_members( community_id => $id) || [];
+  my $bbs = $ws->show_bbs(
+    community_id => $community_id,
+    thread_id    => $thread_id,
+  ) || [];
   use YAML;
-  print YAML::Dump [ sort @$members ];
+  print YAML::Dump [ sort @$bbs ];
 }
 
