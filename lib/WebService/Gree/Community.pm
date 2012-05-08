@@ -123,7 +123,6 @@ sub get_members {
   for my $offset (0..$member_count/10){
     my $page_member = $self->_parse_community_members($community_id, $offset * 10) || [];
     push @$members, @$page_member;
-    warn join(',', @$page_member);
   }
   return $members;
 }
@@ -287,26 +286,35 @@ sub _parse_bbs {
   my $html = shift;
   my $result = [];
   my $scraper = scraper {
-    process '//div', 'divs[]' => scraper {
+    process '//div[@class="comment comment-text community_bbs_view"]', 'divs[]' => scraper {
       process '//div[@class="userName"]/div[@class="nickname"]', user_name => 'TEXT';
       process '//div[@class="comTxt"]',                          description => 'TEXT';
       process '//div[@class="timestamp"]',                       timestamp => 'TEXT';
-    };
+    }, 'ids[]' => '@id';
+
   };
 
   my $data = $scraper->scrape($html);
+  my $index = 0;
+  #comment_idを取り出す
+  my $ids =  [ grep { $_ =~ s{^msg-(\d+)$}{$1} } @{$data->{ids}} ];
+
   for my $div (@{$data->{divs}}){
     #関係ない div を除去する
-    next if ref $div ne 'HASH';
-    next if not exists $div->{user_name} or not exists $div->{description} or not exists $div->{timestamp};
 
     #valueの前後に半角空白が入るので trim してやる
     while(my($k, $v) = each %$div){
       $div->{$k} = trim($v);
     }
-    push @$result, $div;
 
+    #整形 & comment_id加えつつ結果にpush
+    push @$result, {
+      %$div,
+      id => $ids->[$index],
+    };
+    $index++;
   }
+  $result = [sort {$a->{id} <=> $b->{id} } @$result ];
   return $result;
 }
 
