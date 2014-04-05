@@ -297,7 +297,13 @@ sub _parse_bbs {
     my $data = $scraper->scrape($html);
     my $index = 0;
     #comment_idを取り出す
-    my $ids =  [ grep { $_ =~ s{^msg-(\d+)$}{$1} } @{$data->{ids}} ];
+    my $ids =  [
+        map {
+            my $w = $_;
+            $w =~ s{^msg-(\d+)$}{$1};
+            $w;
+        } @{$data->{ids}}
+    ];
 
     for my $div (@{$data->{divs}}){
         #関係ない div を除去する
