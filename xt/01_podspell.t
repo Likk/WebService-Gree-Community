@@ -13,3 +13,4 @@ STARTUP
 login
 mech
 username
+bbs
