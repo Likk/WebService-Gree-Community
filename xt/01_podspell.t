@@ -14,3 +14,4 @@ login
 mech
 username
 bbs
+conf

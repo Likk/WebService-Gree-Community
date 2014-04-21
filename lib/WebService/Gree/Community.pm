@@ -2,7 +2,7 @@ package WebService::Gree::Community;
 
 =head1 NAME
 
-WebService::Gree::Community - Gree community members info.
+WebService::Gree::Community - Gree community info.
 
 =head1 SYNOPSIS
 
@@ -12,24 +12,41 @@ WebService::Gree::Community - Gree community members info.
     password      => 'your password',
     community_id  => 000000,
   );
-  my $members = $gree->get_members;
+  my $bbs_list = $gree->show_bbs_list;
   use YAML;
-  print YAML::Dump $members;
+  print YAML::Dump $bbs_list;
 
 =head1 DESCRIPTION
 
-WebService::Gree::Community is scraping at Gree community pages.
+WebService::Gree::Community is scraping at community pages in Gree.
 
 =cut
 
 use strict;
 use warnings;
+use utf8;
+use 5.10.0;
 use Carp;
+use HTTP::Date;
 use WWW::Mechanize;
 use Web::Scraper;
 use Text::Trim;
+use YAML;
 
-our $VERSION = '0.01';
+=head1 GLOBAL VARIABLE
+
+=head2 VERSION
+
+this is version of this package.
+
+=head2 GUESS_YEAR
+
+西暦データが取れないので発言IDなどから推測する
+
+=cut
+
+our $VERSION    = '2.00';
+our $GUESS_YEAR = 0;
 
 =head1 CONSTRUCTOR AND STARTUP
 
@@ -38,51 +55,106 @@ our $VERSION = '0.01';
 Creates and returns a new WebService::Gree::Community object.:
 
 WebService::Gree::Community->new(
-#required-
+#required
     username => q{YOUR USERNAME},
     password => q{YOUR PASSWORD},
 #option
     id    => q{community_id},
 );
 
-WebService::AipoLiveオブジェクトの作成
+WebService::Gree::Community オブジェクトの作成
 
 =cut
 
 sub new {
     my $class = shift;
     my %args  = @_;
-    $args{agent}      ||= __PACKAGE__." ".$VERSION;
-    $args{mech}         = WWW::Mechanize->new(
-        agent => 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:8.0) Gecko/20100101 Firefox/8.0',
-    );
-    $args{root}         = 'http://t.gree.jp';
-    $args{last_req}  = time;
-    $args{interval}  = 3; #sec.
-    my $self = bless {%args}, $class;
-    $self->login;
+
+    my $self = bless { %args }, $class;
+    $self->login();
     return $self;
+}
+
+=head1 ACCESSOR
+
+=head2 conf
+
+configure at free.net
+
+=cut
+
+#XXX: WebService::Gree::URI とか作ってそこに逃すべき
+sub conf {
+    my $self = shift;
+    return $self->{conf} ||= do {
+        my $conf = {
+            origin      => 'secure.gree.jp',
+        };
+        $conf->{login_url}      = sub { sprintf("https://%s/",  $conf->{origin}) };
+        $conf->{community_top}  = sub { sprintf("http://%s/community/%s", $conf->{origin}, shift) };
+        $conf->{bbs_list}       = sub {
+            my ($community_id, $offset) = @_;
+            sprintf("http://%s/?mode=community&act=bbs_list&community_id=%s&offset=%s&limit=20", $conf->{origin}, $community_id, $offset);
+        };
+        $conf->{bbs_view}            = sub {
+            my $thread_id = shift;
+            my $offset    = shift // 0;
+            sprintf("http://%s/?mode=community&act=bbs_view&thread_id=%s&offset=%s&limit=20", $conf->{origin}, $thread_id, $offset);
+        };
+
+        $self->{conf} = $conf;
+    }
+}
+
+=head2 mech
+
+use WWW::Mechanize object
+
+=cut
+
+sub mech {
+    my $self = shift;
+    unless($self->{mech}){
+        my $mech = WWW::Mechanize->new(
+            agent      => 'Mozilla/5.0 (Windows NT 6.1; rv:28.0) Gecko/20100101 Firefox/28.0',
+            cookie_jar => {},
+        );
+        $mech->stack_depth(10);
+        $self->{mech} = $mech;
+    }
+    return $self->{mech};
+}
+
+=head2 interval
+
+sleeping time per one action by Mech.
+
+=head2 last_request_time
+
+request time at last;
+
+=cut
+
+sub interval          { return shift->{interval} ||= 1    }
+sub last_request_time { return shift->{last_req} ||= time }
+sub guess_year        {
+    my $self = shift;
+    my $w    = shift;
+    if(defined $w){
+        $GUESS_YEAR = $w;
+    }
+    return $GUESS_YEAR;
 }
 
 =head1 METHOD
 
-=head2 login
+=head2 set_last_request_time
 
-ログインする
+set request time
 
 =cut
 
-sub login {
-    my $self = shift;
-    my $post = {
-        action        => 'id_login',
-        backto        => '',
-        user_mail     => $self->{mail_address},
-        user_password => $self->{password},
-        login_status  => 1,
-    };
-    my $res = $self->post($self->{root}, $post);
-}
+sub set_last_request_time { shift->{last_req} = time }
 
 =head2 post
 
@@ -93,7 +165,7 @@ mech post with interval.
 sub post {
     my $self = shift;
     $self->_sleep_interval;
-    $self->{'mech'}->post(@_);
+    $self->mech->post(@_);
 }
 
 =head2 get
@@ -105,8 +177,48 @@ mech get with interval.
 sub get {
     my $self = shift;
     $self->_sleep_interval;
-    $self->{'mech'}->get(@_);
+    $self->mech->get(@_);
 }
+
+=head2 login
+
+ログインする
+
+=cut
+
+sub login {
+    my $self = shift;
+    my $login_url = $self->conf->{login_url};
+
+    my $res  = $self->get($login_url->());
+    my $content = $self->mech->content;
+
+    my ($tok, $etok);
+    if($content =~m{<input\stype="hidden"\sname="csrf\[etok\]"\svalue="(.*?)"\s/>}){
+        $etok = $1;
+    }
+    if($content =~m{<input\stype="hidden"\sname="csrf\[tok\]"\svalue="(.*?)"\s/>}){
+        $tok = $1;
+    }
+
+    my $post = {
+        mode             => 'common',
+        act              => 'login',
+        backto           => '',
+        campaign_code    => '',
+        'csrf[tok]'      => $tok,
+        'csrf[etok]'     => $etok,
+        user_mail        => $self->{mail_address},
+        user_password    => $self->{password},
+        login_status     => 1,
+        submit           => 'ログイン',
+    };
+
+    $self->mech->post($login_url->(), $post);
+    $content =  $self->mech->content;
+    die 'cant login' if Encode::encode_utf8($content) =~ /ログインが完了しました。/;
+}
+
 
 =head2 get_members
 
@@ -115,16 +227,7 @@ sub get {
 =cut
 
 sub get_members {
-    my $self = shift;
-    my %args = @_;
-    my $community_id = $args{community_id} ? $args{community_id} : $self->{community_id};
-    my $members = [];
-    my $member_count = $self->_perse_member_count($community_id);
-    for my $offset (0..$member_count/10){
-        my $page_member = $self->_parse_community_members($community_id, $offset * 10) || [];
-        push @$members, @$page_member;
-    }
-    return $members;
+    die 'sorry, this method is not updated.';
 }
 
 =head2 get_bbs_list
@@ -137,15 +240,53 @@ sub get_bbs_list {
     my $self = shift;
     my %args = @_;
     my $community_id = $args{community_id} ? $args{community_id} : $self->{community_id};
+    $self->get($self->conf->{community_top}($community_id));
+
     my $bbs_list = [];
     my $offset   = 0;
     while (1){
-        my $res = $self->get("@{[$self->{root}]}/?community_id=@{[$community_id]}&action=community_bbs_list&more=1&offset=@{[$offset]}");
+        my $url = $self->conf->{bbs_list}($community_id, $offset);
+        my $res = $self->get($url);
         my $bbs_list_wk = $self->_parse_bbs_list($res->decoded_content()) || [];
         push @$bbs_list, @$bbs_list_wk;
-        last if scalar @$bbs_list_wk < 10;
-        $offset += 10;
+
+        #bbs_list が20の時だけ、次のページを呼び出す
+        #取れない、若しくは20未満の場合は次のページはない
+        #20を越えた時はそもそもパースがおかしい
+        last unless    scalar @$bbs_list_wk == 20;
+        $offset += 20;
     }
+    $bbs_list = [ sort {$b->{thread_id} <=> $a->{thread_id} }  @$bbs_list ];
+
+    if($self->guess_year){
+        my $epoch = time;
+        my $lt    = [ localtime($epoch) ];
+        for my $row (@$bbs_list){
+            #西暦データで取れないので仮で埋めていく
+            #取れるデータは月日時分 ###exp 4/10 12:12
+            #秒は0固定、年は一旦今年を入れる。
+            #現在時刻より未来になってしまうのであれば、それは去年以前と推測されるが一律で去年という扱いにする。
+            my $year  = $lt->[5] + 1900;
+            while(1){
+                my $view_date  = $row->{view_date};
+                $view_date     =~ s{/}{-}g;
+                my $guess_date = sprintf("$year-%s:00 +9:00", $view_date);
+                $guess_date    =~ s{-(\d{1})-}{-0$1-};
+                $guess_date    =~ s{-(\d{1}) }{-0$1 };
+                my $time       = HTTP::Date::str2time($guess_date);
+                if($epoch > $time){
+                    #$epoch = $time;
+                    $row->{epoch}     = $time;
+                    $row->{timestamp} = HTTP::Date::time2iso($time);
+                    last;
+                }
+                $year--;
+                die 'something wrong year.' if $year < 2004 #greeができるより前の年になるのは何かおかしい
+            }
+        }
+        $bbs_list = [ sort {$b->{epoch} <=> $a->{epoch} }  @$bbs_list ];
+    }
+
     return $bbs_list;
 }
 
@@ -158,11 +299,11 @@ bbs内の閲覧
 sub show_bbs {
     my $self = shift;
     my %args = @_;
-    my $page = $self->{page} || 1;
-    my $community_id = $args{community_id} ? $args{community_id} : $self->{community_id};
+    my $page = $self->{page} // 0;
     my $thread_id    = $args{thread_id};
-    my $offset       = ($page - 1) * 5;
-    my $res = $self->get("@{[$self->{root}]}/?community_id=@{[$community_id]}&thread_id=@{[$thread_id]}&action=community_bbs_view&offset=@{[$offset]}");
+    my $offset       = $page  * 20;
+    my $url = $self->conf->{bbs_view}($thread_id, $offset);
+    my $res = $self->get($url);
     $self->_parse_bbs($res->decoded_content);
 }
 
@@ -178,9 +319,9 @@ sub show_bbs {
 
 sub _sleep_interval {
     my $self = shift;
-    my $wait = $self->{interval} - (time - $self->{last_req});
+    my $wait = $self->interval - (time - $self->last_request_time);
     sleep $wait if $wait > 0;
-    $self->{last_req} = time;
+    $self->set_last_request_time();
 }
 
 =item B<_perse_member_count>
@@ -189,23 +330,7 @@ sub _sleep_interval {
 
 =cut
 
-sub _perse_member_count {
-    my $self = shift;
-    my $community_id = shift;
-    my $res     = $self->get("@{[$self->{root}]}/?action=community_bbs_list&community_id=@{[$community_id]}&from_tsns=stream_community&group=community");
-    my $content = $res->decoded_content();
-
-    my $scraper = scraper {
-        process '//div[@class="txt"]/table[1]/tbody/tr[2]/td', member => 'TEXT';
-        result 'member';
-    };
-    my $result = $scraper->scrape($content);
-
-    #1,000人 の数値のところだけをとって、カンマを取り除く
-    $result =~ s/^((\d|,)+)?.*$/$1/;
-    $result =~ s/,//g;
-    return $result;
-}
+sub _perse_member_count      { die 'sorry, this method is not updated.'; }
 
 =item B<_parse_community_members>
 
@@ -213,24 +338,7 @@ sub _perse_member_count {
 
 =cut
 
-sub _parse_community_members {
-    my $self   = shift;
-    my $community_id = shift;
-    my $offset = shift;
-    my $members = [];
-    my $res     = $self->get("@{[$self->{root}]}/?action=community_view_joinlist&community_id=@{[$community_id]}&group=community&offset=@{[$offset]}&tab=community_members&more=1");
-    my $content = $res->decoded_content();
-    my $scraper = scraper {
-        process '//div[@class="followerList clearfix community_view_joinlist"]', 'members[]' => '@id';
-        result 'members';
-    };
-    my $result = $scraper->scrape($content);
-    for my $div_id (@$result){
-        $div_id =~ s/community_view_joinlist-//g;
-        push @$members, $div_id;
-    }
-    return $members;
-}
+sub _parse_community_members {  die 'sorry, this method is not updated.'; }
 
 =item B<_bbs_list>
 
@@ -242,34 +350,32 @@ sub _parse_bbs_list {
     my $self = shift;
     my $html = shift;
     my $bbs_list = [];
-
     my $scraper = scraper {
-        process '//a', 'data[]' => scraper {
-            process '//div[@class="txt"]/div[1]/span[@class="userName"]', title       => 'TEXT';
-            process '//div[@class="txt"]/div[1]/span[@class="count"]',    count       => 'TEXT';
-            process '//div[@class="txt"]//div[@class="description"]',     description => 'TEXT';
-            process '//div[@class="txt"]//div[@class="timestamp"]',       timestamp   => 'TEXT';
+        process '//ul[@class="feed-list clearfix"]/li', 'data[]' => scraper {
+            process '//div[@class="item"]/div[@class="head"]',                              head      => 'TEXT';
+            process '//div[@class="item"]/div[@class="head"]/a',                            url       => '@href';
+            process '//div[@class="item"]/div[@class="response"]/span[@class="timestamp"]', view_date => 'TEXT';
         };
-        process '//a', 'script[]' => '@onclick';
     };
-    my $bbs_list_wk = $scraper->scrape($html);
-    for my $index (0.. $#{$bbs_list_wk->{data}}){
+    my $bbs_list_wk = $scraper->scrape($html)->{data};
+    $bbs_list_wk = [ grep { keys %$_; } @$bbs_list_wk ];
+    for my $row (@$bbs_list_wk){
 
-        #thread_id が onclick に入り込んでるのでそれを取り出してやる
-        my $script = $bbs_list_wk->{script}->[$index];
-        $script =~ s{^(?:.*)?'thread_id':'(\d+)'(.*)?$}{$1};
+        my $head = $row->{head};
+        my @title_wk = split /（/, $head;
+        my $count    = pop @title_wk;
+        chop($count);
+        my $title    = join('', @title_wk);
 
-
-        #valueの前後に半角空白が入るので trim してやる
-        my $data = $bbs_list_wk->{data}->[$index];
-        while(my($k, $v) = each %$data){
-            $data->{$k} = trim($v);
-        }
+        my $thread_id = [split /=/,$row->{url}]->[-1];
 
         #整形して結果にpush
         push @$bbs_list, {
-            %{$data},
-            link => $script,
+            title     => $title,
+            count     => $count,
+            view_date => $row->{view_date},
+            'link'    => $row->{url},
+            thread_id => $thread_id,
         };
     }
     return $bbs_list;
@@ -284,43 +390,76 @@ sub _parse_bbs_list {
 sub _parse_bbs {
     my $self = shift;
     my $html = shift;
-    my $result = [];
     my $scraper = scraper {
-        process '//div[@class="comment comment-text community_bbs_view"]', 'divs[]' => scraper {
-            process '//div[@class="userName"]/div[@class="nickname"]', user_name => 'TEXT';
-            process '//div[@class="comTxt"]',                          description => 'TEXT';
-            process '//div[@class="timestamp"]',                       timestamp => 'TEXT';
-        }, 'ids[]' => '@id';
-
+        process '//div[@id="comment-list"]/ul[@class="comment-list"]/li', 'comments[]' => scraper {
+            process '*', id => '@id';
+            process '//div[@class="item"]/strong',                      user_name => 'TEXT';
+            process '//div[@class="item"]/strong/a',                    user_link => '@href';
+            process '//div[@class="shoulder"]/span[@class="timestamp"]', view_date => 'TEXT';
+            process '//div[@class="item"]',                             raw_data  => 'TEXT';
+        };
+        result 'comments';
     };
-
     my $data = $scraper->scrape($html);
-    my $index = 0;
-    #comment_idを取り出す
-    my $ids =  [
-        map {
-            my $w = $_;
-            $w =~ s{^msg-(\d+)$}{$1};
-            $w;
-        } @{$data->{ids}}
-    ];
 
-    for my $div (@{$data->{divs}}){
-        #関係ない div を除去する
-
-        #valueの前後に半角空白が入るので trim してやる
-        while(my($k, $v) = each %$div){
-            $div->{$k} = trim($v);
+    for my $row (@$data){
+        next unless $row->{id};
+        #user_id を リンクから抽出する
+        if($row->{user_id} = $row->{user_link}){
+            if($row->{user_id} =~ /.*?(\d+)?$/){
+                $row->{user_id} = $1;
+            }
         }
 
-        #整形 & comment_id加えつつ結果にpush
-        push @$result, {
-            %$div,
-            id => $ids->[$index],
-        };
-        $index++;
+        #日付時刻以降が本文なので、それを抽出する
+        if($row->{description} = $row->{raw_data}){
+            $row->{description} = [ split m{\d{1,2}/\d{1,2}\s\d{1,2}:\d{1,2}}, $row->{description} ]->[1];
+            #raw_data は要らない子
+            delete $row->{raw_data};
+        }
     }
-    $result = [sort {$a->{id} <=> $b->{id} } @$result ];
+
+    my $result = [
+        sort {
+            $b->{id} <=> $a->{id}
+        }
+        grep {
+            defined $_->{id}
+        }
+        @$data
+    ];
+
+
+    #bbs_id順にsort
+    if($self->guess_year){
+        my $epoch = time;
+        my $lt    = [ localtime($epoch) ];
+        for my $row (@$result){
+            #西暦データで取れないので仮で埋めていく
+            #取れるデータは月日時分 ###exp 4/10 12:12
+            #秒は0固定、年は一旦今年を入れる。
+            #現在時刻より未来になってしまうのであれば、それは去年以前と推測されるが一律で去年という扱いにする。
+            my $year  = $lt->[5] + 1900;
+            while(1){
+                my $view_date  = $row->{view_date};
+                $view_date     =~ s{/}{-}g;
+                my $guess_date = sprintf("$year-%s:00 +9:00", $view_date);
+                $guess_date    =~ s{-(\d{1})-}{-0$1-};
+                $guess_date    =~ s{-(\d{1}) }{-0$1 };
+                my $time       = HTTP::Date::str2time($guess_date);
+                if($epoch > $time){
+                    #$epoch = $time;
+                    $row->{epoch}     = $time;
+                    $row->{timestamp} = HTTP::Date::time2iso($time);
+                    last;
+                }
+                $year--;
+                die 'something wrong year.' if $year < 2004 #greeができるより前の年になるのは何かおかしい
+            }
+        }
+        $result = [ sort {$b->{epoch} <=> $a->{epoch} }  @$result ];
+    }
+
     return $result;
 }
 
