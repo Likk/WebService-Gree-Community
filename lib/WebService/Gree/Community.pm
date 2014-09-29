@@ -89,8 +89,9 @@ sub conf {
     return $self->{conf} ||= do {
         my $conf = {
             origin      => 'secure.gree.jp',
+            login       => 'id.gree.net',
         };
-        $conf->{login_url}      = sub { sprintf("https://%s/",  $conf->{origin}) };
+        $conf->{login_url}      = sub { sprintf("https://%s/login/entry?ignore_sso=1&backto=",  $conf->{login}) };
         $conf->{community_top}  = sub { sprintf("http://%s/community/%s", $conf->{origin}, shift) };
         $conf->{bbs_list}       = sub {
             my ($community_id, $offset) = @_;
@@ -193,30 +194,32 @@ sub login {
     my $res  = $self->get($login_url->());
     my $content = $self->mech->content;
 
-    my ($tok, $etok);
-    if($content =~m{<input\stype="hidden"\sname="csrf\[etok\]"\svalue="(.*?)"\s/>}){
-        $etok = $1;
-    }
-    if($content =~m{<input\stype="hidden"\sname="csrf\[tok\]"\svalue="(.*?)"\s/>}){
-        $tok = $1;
+    my ($id_csrf);
+
+    #<input type="hidden" name="id_csrf[token]" value="79274d9f5a5e40fa2cea97c5d99d5dfd36be3221" />
+    if($content =~m{<input\stype="hidden"\sname="id_csrf\[token\]"\svalue="(.*?)"\s/>}){
+        $id_csrf = $1;
     }
 
+    die 'cant get id_csrf' unless $id_csrf;
     my $post = {
-        mode             => 'common',
-        act              => 'login',
+        'id_csrf[token]' => $id_csrf,
+        action           => 'login_web_commit',
         backto           => '',
-        campaign_code    => '',
-        'csrf[tok]'      => $tok,
-        'csrf[etok]'     => $etok,
-        user_mail        => $self->{mail_address},
+        ithk             => '',
+        from_glogin      => 'login_login',
+        mail              => $self->{mail_address},
         user_password    => $self->{password},
-        login_status     => 1,
-        submit           => 'ログイン',
     };
-
     $self->mech->post($login_url->(), $post);
     $content =  $self->mech->content;
-    die 'cant login' if Encode::encode_utf8($content) =~ /ログインが完了しました。/;
+    if($content =~ m{url\s=\s"(http://.*?)";}){
+        my $next_url = $1;
+        my $res = $self->mech->get($next_url);
+    }
+    else {
+        die 'cant login';
+    }
 }
 
 
